@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch-kafka-connect
+  labels:
+    app.kubernetes.io/name: elasticsearch-kafka-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch-kafka-connect
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch-kafka-connect
+    spec:
+      containers:
+      - name: logstash
+        image: docker.elastic.co/logstash/logstash:6.8.6
+        ports:
+        - containerPort: 25826
+        env:
+        - name: ES_HOSTS
+          value: "https://elasticsearch-es-http:9200"
+        - name: ES_USER
+          value: "elastic"
+        - name: ES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elasticsearch-es-elastic-user
+              key: elastic
+        resources:
+          limits:
+            memory: 4Gi
+        volumeMounts:
+        - name: config-volume
+          mountPath: /usr/share/logstash/config
+        - name: logstash-pipeline-volume
+          mountPath: /usr/share/logstash/pipeline
+        - name: cert-ca
+          mountPath: "/etc/logstash/certificates"
+          readOnly: true
+      - name: exporter
+        image: turbonomic/exporter
+        imagePullPolicy: IfNotPresent
+#        args:
+#          - --namespace=customer
+#          - --mode=stdout
+#          - --loglevel=DEBUG
+        securityContext:
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          limits:
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /tmp
+          name: elasticsearch-tmpfs0
+      volumes:
+      - name: config-volume
+        configMap:
+          name: logstash-configmap
+          items:
+            - key: logstash.yml
+              path: logstash.yml
+      - name: logstash-pipeline-volume
+        configMap:
+          name: logstash-configmap
+          items:
+            - key: logstash.conf
+              path: logstash.conf
+      - name: cert-ca
+        secret:
+          secretName: elasticsearch-es-http-certs-public
+          optional: true
+      - name: elasticsearch-tmpfs0
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-configmap
+data:
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    path.config: /usr/share/logstash/pipeline
+  logstash.conf: |
+    input {
+      kafka {
+        topics => ["turbonomic.exporter"]
+        bootstrap_servers => "kafka:9092"
+        client_id => "logstash"
+        group_id => "logstash"
+        codec => "json"
+        type => "json"
+        session_timeout_ms => "60000"   # Rebalancing if consumer is found dead
+        request_timeout_ms => "70000"   # Resend request after 70 seconds
+      }
+    }
+    filter {
+    }
+    output {
+      elasticsearch {
+        index => "turbonomic}"
+        hosts => [ "${ES_HOSTS}" ]
+        user => "${ES_USER}"
+        password => "${ES_PASSWORD}"
+        manage_template => false
+        ssl => true
+        ssl_certificate_verification => true
+        cacert => '/etc/logstash/certificates/ca.crt'
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: elasticsearch-kafka-connect
+  name: elasticsearch-kafka-connect
+spec:
+  ports:
+    - name: "25826"
+      port: 25826
+      targetPort: 25826
+  selector:
+    app: elasticsearch-kafka-connect
